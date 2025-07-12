@@ -1,46 +1,4 @@
-// Package runagent provides a Go client SDK for interacting with RunAgent AI agents.
-//
-// The SDK supports both streaming and non-streaming agent execution,
-// with comprehensive error handling and context-based cancellation.
-//
-// Basic Usage:
-//
-//	config := runagent.Config{
-//		AgentID:       "your-agent-id",
-//		EntrypointTag: "demo",
-//		Local:         true,
-//		Host:          "localhost",
-//		Port:          8450,
-//	}
-//
-//	client := runagent.NewRunAgentClient(config)
-//	ctx := context.Background()
-//
-//	if err := client.Initialize(ctx); err != nil {
-//		log.Fatal(err)
-//	}
-//
-//	result, err := client.Run(ctx, map[string]interface{}{
-//		"role":    "user",
-//		"message": "Hello, world!",
-//	})
-//
-// Streaming Usage:
-//
-//	// Use an entrypoint that ends with "_stream"
-//	config.EntrypointTag = "demo_stream"
-//
-//	streamResult, err := client.Run(ctx, inputKwargs)
-//	streamIterator := streamResult.(*runagent.StreamIterator)
-//	defer streamIterator.Close()
-//
-//	for {
-//		chunk, hasMore, err := streamIterator.Next(ctx)
-//		if err != nil || !hasMore {
-//			break
-//		}
-//		fmt.Print(chunk)
-//	}
+// runagent.go - Main SDK implementation
 package runagent
 
 import (
@@ -56,53 +14,32 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Config represents the configuration for the RunAgent client.
-// It contains all necessary parameters to connect to and authenticate
-// with a RunAgent server instance.
+// Config represents the configuration for the RunAgent client
 type Config struct {
-	// AgentID is the unique identifier of the agent to execute
-	AgentID string `json:"agent_id"`
-
-	// EntrypointTag specifies which entrypoint of the agent to call.
-	// For streaming responses, use entrypoints ending with "_stream"
+	AgentID       string `json:"agent_id"`
 	EntrypointTag string `json:"entrypoint_tag"`
-
-	// Local indicates whether to connect to a local RunAgent server
-	Local bool `json:"local,omitempty"`
-
-	// Host is the hostname for local connections (default: "localhost")
-	Host string `json:"host,omitempty"`
-
-	// Port is the port number for local connections (default: 8080)
-	Port int `json:"port,omitempty"`
-
-	// APIKey for authentication with remote RunAgent servers
-	APIKey string `json:"api_key,omitempty"`
-
-	// BaseURL for remote RunAgent servers
-	BaseURL string `json:"base_url,omitempty"`
-
-	// BaseSocketURL for WebSocket connections to remote servers
+	Local         bool   `json:"local,omitempty"`
+	Host          string `json:"host,omitempty"`
+	Port          int    `json:"port,omitempty"`
+	APIKey        string `json:"api_key,omitempty"`
+	BaseURL       string `json:"base_url,omitempty"`
 	BaseSocketURL string `json:"base_socket_url,omitempty"`
-
-	// APIPrefix is the API path prefix (default: "/api/v1")
-	APIPrefix string `json:"api_prefix,omitempty"`
+	APIPrefix     string `json:"api_prefix,omitempty"`
 }
 
-// AgentArchitecture represents the structure of an agent,
-// including all available entrypoints.
+// AgentArchitecture represents the structure of an agent
 type AgentArchitecture struct {
 	Entrypoints []Entrypoint `json:"entrypoints"`
 }
 
-// Entrypoint represents a single agent entrypoint with metadata.
+// Entrypoint represents an agent entrypoint
 type Entrypoint struct {
 	Tag         string `json:"tag"`
 	Name        string `json:"name,omitempty"`
 	Description string `json:"description,omitempty"`
 }
 
-// APIResponse represents a standardized response from the RunAgent API.
+// APIResponse represents a response from the API
 type APIResponse struct {
 	Success    bool        `json:"success"`
 	OutputData interface{} `json:"output_data,omitempty"`
@@ -110,8 +47,7 @@ type APIResponse struct {
 	Data       interface{} `json:"data,omitempty"`
 }
 
-// WebSocketMessage represents a message sent or received via WebSocket
-// for streaming agent interactions.
+// WebSocketMessage represents a WebSocket message
 type WebSocketMessage struct {
 	ID        string                 `json:"id"`
 	Type      string                 `json:"type"`
@@ -121,15 +57,14 @@ type WebSocketMessage struct {
 	Error     string                 `json:"error,omitempty"`
 }
 
-// ExecutionRequest represents a request for agent execution sent via WebSocket.
+// ExecutionRequest represents a request for agent execution
 type ExecutionRequest struct {
 	Action    string                 `json:"action"`
 	AgentID   string                 `json:"agent_id"`
 	InputData map[string]interface{} `json:"input_data"`
 }
 
-// RunAgentClient is the main client for interacting with RunAgent servers.
-// It provides methods for both streaming and non-streaming agent execution.
+// RunAgentClient is the main client for interacting with RunAgent
 type RunAgentClient struct {
 	config       Config
 	httpClient   *http.Client
@@ -139,8 +74,7 @@ type RunAgentClient struct {
 	socketURL    string
 }
 
-// NewRunAgentClient creates a new RunAgent client with the given configuration.
-// The client must be initialized with Initialize() before use.
+// NewRunAgentClient creates a new RunAgent client
 func NewRunAgentClient(config Config) *RunAgentClient {
 	if config.APIPrefix == "" {
 		config.APIPrefix = "/api/v1"
@@ -177,9 +111,7 @@ func NewRunAgentClient(config Config) *RunAgentClient {
 	return client
 }
 
-// Initialize initializes the client by fetching agent architecture and
-// validating that the specified entrypoint exists.
-// This method must be called before Run().
+// Initialize initializes the client by fetching agent architecture
 func (c *RunAgentClient) Initialize(ctx context.Context) error {
 	architecture, err := c.getAgentArchitecture(ctx)
 	if err != nil {
@@ -203,12 +135,7 @@ func (c *RunAgentClient) Initialize(ctx context.Context) error {
 	return nil
 }
 
-// Run executes the agent with the given input parameters.
-// For streaming entrypoints (ending with "_stream"), returns a *StreamIterator.
-// For non-streaming entrypoints, returns the response data directly.
-//
-// The inputKwargs map should contain the parameters expected by your agent function.
-// Common parameters include "role", "message", "prompt", etc.
+// Run executes the agent with the given input
 func (c *RunAgentClient) Run(ctx context.Context, inputKwargs map[string]interface{}) (interface{}, error) {
 	if strings.HasSuffix(c.config.EntrypointTag, "_stream") {
 		return c.runStream(ctx, inputKwargs)
@@ -216,13 +143,16 @@ func (c *RunAgentClient) Run(ctx context.Context, inputKwargs map[string]interfa
 	return c.run(ctx, inputKwargs)
 }
 
-// run executes the agent via REST API for non-streaming responses.
+// run executes the agent via REST API
 func (c *RunAgentClient) run(ctx context.Context, inputKwargs map[string]interface{}) (interface{}, error) {
 	fmt.Printf("🤖 Executing agent: %s\n", c.config.AgentID)
 
+	// Create the correct request format that matches what the server expects
 	requestData := map[string]interface{}{
-		"input_args":   []interface{}{},
-		"input_kwargs": inputKwargs,
+		"input_data": map[string]interface{}{
+			"input_args":   []interface{}{},
+			"input_kwargs": inputKwargs,
+		},
 	}
 
 	jsonData, err := json.Marshal(requestData)
@@ -266,33 +196,35 @@ func (c *RunAgentClient) run(ctx context.Context, inputKwargs map[string]interfa
 		return nil, fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
 	}
 
-	var result interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	// Try to parse as APIResponse first
+	var apiResp APIResponse
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		// If that fails, try to parse as generic JSON
+		var genericResp interface{}
+		if err2 := json.Unmarshal(body, &genericResp); err2 != nil {
+			return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+		}
+		return genericResp, nil
 	}
 
-	if respMap, ok := result.(map[string]interface{}); ok {
-		if success, exists := respMap["success"]; exists {
-			if successBool, ok := success.(bool); ok && !successBool {
-				if errorMsg, exists := respMap["error"]; exists {
-					return nil, fmt.Errorf("agent execution failed: %v", errorMsg)
-				}
-			}
-		}
-
-		if outputData, exists := respMap["output_data"]; exists && outputData != nil {
-			return c.serializer.DeserializeObject(outputData, false), nil
-		}
-		if data, exists := respMap["data"]; exists && data != nil {
-			return c.serializer.DeserializeObject(data, false), nil
-		}
+	if !apiResp.Success && apiResp.Error != "" {
+		return nil, fmt.Errorf("agent execution failed: %s", apiResp.Error)
 	}
 
 	fmt.Println("✅ Agent execution completed!")
-	return c.serializer.DeserializeObject(result, false), nil
+
+	// Return the appropriate data field
+	if apiResp.OutputData != nil {
+		return c.serializer.DeserializeObject(apiResp.OutputData, false), nil
+	}
+	if apiResp.Data != nil {
+		return c.serializer.DeserializeObject(apiResp.Data, false), nil
+	}
+
+	return apiResp, nil
 }
 
-// runStream executes the agent via WebSocket for streaming responses.
+// runStream executes the agent via WebSocket for streaming
 func (c *RunAgentClient) runStream(ctx context.Context, inputKwargs map[string]interface{}) (*StreamIterator, error) {
 	wsURL := fmt.Sprintf("%s/agents/%s/execute/%s", c.socketURL, c.config.AgentID, c.config.EntrypointTag)
 
@@ -313,6 +245,7 @@ func (c *RunAgentClient) runStream(ctx context.Context, inputKwargs map[string]i
 		return nil, fmt.Errorf("failed to connect to WebSocket: %w", err)
 	}
 
+	// Send start message with correct format
 	request := ExecutionRequest{
 		Action:  "start_stream",
 		AgentID: c.config.AgentID,
@@ -343,7 +276,7 @@ func (c *RunAgentClient) runStream(ctx context.Context, inputKwargs map[string]i
 	return NewStreamIterator(conn, c.serializer), nil
 }
 
-// getAgentArchitecture fetches the agent architecture from the server.
+// getAgentArchitecture fetches the agent architecture
 func (c *RunAgentClient) getAgentArchitecture(ctx context.Context) (*AgentArchitecture, error) {
 	url := fmt.Sprintf("%s/agents/%s/architecture", c.baseURL, c.config.AgentID)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -380,8 +313,7 @@ func (c *RunAgentClient) getAgentArchitecture(ctx context.Context) (*AgentArchit
 	return &architecture, nil
 }
 
-// StreamIterator handles streaming responses from WebSocket connections.
-// It provides an iterator interface for processing streaming agent responses.
+// StreamIterator handles streaming responses
 type StreamIterator struct {
 	conn       *websocket.Conn
 	serializer *CoreSerializer
@@ -389,7 +321,7 @@ type StreamIterator struct {
 	err        error
 }
 
-// NewStreamIterator creates a new stream iterator for the given WebSocket connection.
+// NewStreamIterator creates a new stream iterator
 func NewStreamIterator(conn *websocket.Conn, serializer *CoreSerializer) *StreamIterator {
 	return &StreamIterator{
 		conn:       conn,
@@ -397,11 +329,7 @@ func NewStreamIterator(conn *websocket.Conn, serializer *CoreSerializer) *Stream
 	}
 }
 
-// Next returns the next item from the stream.
-// Returns (data, hasMore, error) where:
-// - data: the streaming chunk data
-// - hasMore: false when the stream is complete
-// - error: any error that occurred
+// Next returns the next item from the stream
 func (s *StreamIterator) Next(ctx context.Context) (interface{}, bool, error) {
 	if s.finished || s.err != nil {
 		return nil, false, s.err
@@ -457,23 +385,21 @@ func (s *StreamIterator) Next(ctx context.Context) (interface{}, bool, error) {
 	return msg.Data, true, nil
 }
 
-// Close closes the stream iterator and underlying WebSocket connection.
-// This should always be called when done with the iterator to clean up resources.
+// Close closes the stream iterator
 func (s *StreamIterator) Close() error {
 	s.finished = true
 	return s.conn.Close()
 }
 
-// CoreSerializer handles serialization and deserialization of messages
-// between the client and RunAgent server.
+// CoreSerializer handles serialization/deserialization
 type CoreSerializer struct{}
 
-// NewCoreSerializer creates a new core serializer instance.
+// NewCoreSerializer creates a new core serializer
 func NewCoreSerializer() *CoreSerializer {
 	return &CoreSerializer{}
 }
 
-// SerializeMessage serializes a WebSocket message to JSON string.
+// SerializeMessage serializes a WebSocket message
 func (s *CoreSerializer) SerializeMessage(message WebSocketMessage) (string, error) {
 	messageDict := map[string]interface{}{
 		"id":        message.ID,
@@ -498,7 +424,7 @@ func (s *CoreSerializer) SerializeMessage(message WebSocketMessage) (string, err
 	return string(data), nil
 }
 
-// DeserializeMessage deserializes a JSON string to WebSocket message.
+// DeserializeMessage deserializes a WebSocket message
 func (s *CoreSerializer) DeserializeMessage(jsonStr string) (*WebSocketMessage, error) {
 	var data map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
@@ -529,8 +455,15 @@ func (s *CoreSerializer) DeserializeMessage(jsonStr string) (*WebSocketMessage, 
 	return msg, nil
 }
 
-// DeserializeObject deserializes a JSON response object.
-// The reconstruct parameter is reserved for future use.
+// DeserializeObject deserializes a JSON object
 func (s *CoreSerializer) DeserializeObject(jsonResp interface{}, reconstruct bool) interface{} {
 	return jsonResp // Simple pass-through for now
 }
+
+// Example usage - this would normally be in a separate file
+// func main() {
+// 	fmt.Println("🎯 RunAgent Go SDK")
+// 	fmt.Println("This is the main SDK implementation.")
+// 	fmt.Println("See examples/ directory for usage examples.")
+// 	fmt.Println("Run: go run examples/basic.go")
+// }
