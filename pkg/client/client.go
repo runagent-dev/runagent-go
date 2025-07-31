@@ -270,19 +270,23 @@ func (c *Client) RunStream(ctx context.Context, input map[string]interface{}) (*
 
 	// Send start message with correct format
 	var inputData map[string]interface{}
-	if c.entrypointTag == "generic" || strings.HasSuffix(c.entrypointTag, "_stream") {
-		// For LangGraph streaming, pass input as first argument
-		inputData = map[string]interface{}{
-			"input_args":   []interface{}{input},
-			"input_kwargs": map[string]interface{}{},
-		}
-	} else {
-		// For other streaming entrypoints
-		inputData = map[string]interface{}{
-			"input_args":   []interface{}{},
-			"input_kwargs": input,
-		}
+	inputData = map[string]interface{}{
+		"input_args":   []interface{}{},
+		"input_kwargs": input,
 	}
+	// if c.entrypointTag == "generic" || strings.HasSuffix(c.entrypointTag, "_stream") {
+	// 	// For LangGraph streaming, pass input as first argument
+	// 	inputData = map[string]interface{}{
+	// 		"input_args":   []interface{}{input},
+	// 		"input_kwargs": map[string]interface{}{},
+	// 	}
+	// } else {
+	// 	// For other streaming entrypoints
+	// 	inputData = map[string]interface{}{
+	// 		"input_args":   []interface{}{},
+	// 		"input_kwargs": input,
+	// 	}
+	// }
 
 	request := ExecutionRequest{
 		Action:    "start_stream",
