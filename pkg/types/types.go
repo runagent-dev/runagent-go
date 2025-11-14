@@ -18,27 +18,31 @@ func (e *RunAgentError) Error() string {
 
 // Error constructors
 func NewAuthenticationError(message string) *RunAgentError {
-	return &RunAgentError{Type: "authentication", Message: message}
+	return &RunAgentError{Type: "authentication", Message: message, Code: "AUTHENTICATION_ERROR"}
+}
+
+func NewPermissionError(message string) *RunAgentError {
+	return &RunAgentError{Type: "permission", Message: message, Code: "PERMISSION_ERROR"}
 }
 
 func NewValidationError(message string) *RunAgentError {
-	return &RunAgentError{Type: "validation", Message: message}
+	return &RunAgentError{Type: "validation", Message: message, Code: "VALIDATION_ERROR"}
 }
 
 func NewConnectionError(message string) *RunAgentError {
-	return &RunAgentError{Type: "connection", Message: message}
+	return &RunAgentError{Type: "connection", Message: message, Code: "CONNECTION_ERROR"}
 }
 
 func NewServerError(message string) *RunAgentError {
-	return &RunAgentError{Type: "server", Message: message}
+	return &RunAgentError{Type: "server", Message: message, Code: "SERVER_ERROR"}
 }
 
 func NewDatabaseError(message string) *RunAgentError {
-	return &RunAgentError{Type: "database", Message: message}
+	return &RunAgentError{Type: "database", Message: message, Code: "DATABASE_ERROR"}
 }
 
 func NewConfigError(message string) *RunAgentError {
-	return &RunAgentError{Type: "config", Message: message}
+	return &RunAgentError{Type: "config", Message: message, Code: "CONFIG_ERROR"}
 }
 
 // EntryPoint represents an agent entrypoint

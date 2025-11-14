@@ -1,0 +1,42 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/runagent-dev/runagent-go/pkg/client"
+)
+
+func main() {
+	agentClient, err := client.New(
+		"69d0c230-95f7-4c02-8744-780148a12145",
+		"extracted_research_crew",
+		true,
+	)
+	if err != nil {
+		log.Fatalf("Failed to create client: %v", err)
+	}
+	defer agentClient.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	result, err := agentClient.Run(ctx, map[string]interface{}{
+		"topic": "AI Agent Deployment",
+	})
+	if err != nil {
+		log.Fatalf("Failed to run agent: %v", err)
+	}
+
+	if resultMap, ok := result.(map[string]interface{}); ok {
+		if data, ok := resultMap["data"]; ok {
+			fmt.Println(data)
+		} else {
+			fmt.Printf("%v\n", result)
+		}
+	} else {
+		fmt.Printf("%v\n", result)
+	}
+}

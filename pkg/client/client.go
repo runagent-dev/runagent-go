@@ -7,185 +7,187 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/runagent-dev/runagent-go/pkg/config"
+	"github.com/runagent-dev/runagent-go/pkg/constants"
 	"github.com/runagent-dev/runagent-go/pkg/db"
 	"github.com/runagent-dev/runagent-go/pkg/types"
 )
 
-// WebSocketMessage represents a WebSocket message
-type WebSocketMessage struct {
-	ID        string                 `json:"id"`
-	Type      string                 `json:"type"`
-	Timestamp string                 `json:"timestamp"`
-	Data      interface{}            `json:"data"`
-	Metadata  map[string]interface{} `json:"metadata,omitempty"`
-	Error     string                 `json:"error,omitempty"`
-}
-
-// ExecutionRequest represents a request for agent execution
-type ExecutionRequest struct {
-	Action    string                 `json:"action"`
-	AgentID   string                 `json:"agent_id"`
-	InputData map[string]interface{} `json:"input_data"`
-}
-
-// StreamIterator handles streaming responses
-type StreamIterator struct {
-	conn       *websocket.Conn
-	serializer *CoreSerializer
-	finished   bool
-	err        error
-}
-
-// CoreSerializer handles serialization/deserialization
-type CoreSerializer struct{}
-
-// Client represents a RunAgent client
-type Client struct {
+// RunAgentClient represents a RunAgent client following the SDK contract
+type RunAgentClient struct {
 	agentID       string
 	entrypointTag string
 	local         bool
+	apiKey        string
 	baseURL       string
 	socketURL     string
 	httpClient    *http.Client
 	dbService     *db.Service
 	serializer    *CoreSerializer
+	extraParams   map[string]interface{}
 }
 
-// New creates a new RunAgent client
-func New(agentID, entrypointTag string, local bool) (*Client, error) {
-	client := &Client{
-		agentID:       agentID,
-		entrypointTag: entrypointTag,
-		local:         local,
-		httpClient: &http.Client{
-			Timeout: 5 * time.Minute, // Increased for long-running agents
-		},
-		serializer: NewCoreSerializer(),
+// NewClient creates a new RunAgent client with options
+// Constructor signature follows: agent_id, entrypoint_tag, optional ClientOptions
+func NewClient(agentID, entrypointTag string, opts *ClientOptions) (*RunAgentClient, error) {
+	if opts == nil {
+		opts = &ClientOptions{}
 	}
 
-	if local {
-		// Try to find agent in database
+	client := &RunAgentClient{
+		agentID:       agentID,
+		entrypointTag: entrypointTag,
+		local:         opts.Local,
+		serializer:    NewCoreSerializer(),
+		extraParams:   opts.ExtraParams,
+		httpClient: &http.Client{
+			Timeout: 5 * time.Minute,
+		},
+	}
+
+	// Configuration precedence: constructor args > env vars > defaults
+	// 1. Set API key (constructor > env > default)
+	if opts.APIKey != "" {
+		client.apiKey = opts.APIKey
+	} else if envAPIKey := os.Getenv(constants.EnvAPIKey); envAPIKey != "" {
+		client.apiKey = envAPIKey
+	}
+
+	// 2. Set base URL (constructor > env > default)
+	var baseURL string
+	if opts.BaseURL != "" {
+		baseURL = opts.BaseURL
+	} else if envBaseURL := os.Getenv(constants.EnvBaseURL); envBaseURL != "" {
+		baseURL = envBaseURL
+	} else {
+		baseURL = "https://backend.run-agent.ai"
+	}
+
+	// Ensure proper URL format
+	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+		baseURL = "https://" + baseURL
+	}
+
+	// 3. Resolve host/port and construct URLs
+	if opts.Host != "" && opts.Port != 0 {
+		// Explicit host/port provided
+		client.baseURL = fmt.Sprintf("http://%s:%d", opts.Host, opts.Port)
+		client.socketURL = fmt.Sprintf("ws://%s:%d", opts.Host, opts.Port)
+	} else if opts.Local {
+		// Local mode: try DB discovery
 		dbService, err := db.NewService("")
 		if err != nil {
-			return nil, fmt.Errorf("failed to initialize database: %w", err)
+			return nil, types.NewConnectionError(fmt.Sprintf("failed to initialize local database: %v", err))
 		}
 
 		agent, err := dbService.GetAgent(agentID)
 		if err != nil {
 			dbService.Close()
-			return nil, fmt.Errorf("failed to get agent from database: %w", err)
+			return nil, types.NewConnectionError(fmt.Sprintf("failed to get agent from database: %v", err))
 		}
 
 		if agent == nil {
 			dbService.Close()
-			return nil, types.NewValidationError(fmt.Sprintf("Agent %s not found in local database", agentID))
+			return nil, types.NewValidationError(fmt.Sprintf("Agent %s not found in local database. Start or register the agent locally first.", agentID))
 		}
 
 		client.baseURL = fmt.Sprintf("http://%s:%d", agent.Host, agent.Port)
 		client.socketURL = fmt.Sprintf("ws://%s:%d", agent.Host, agent.Port)
 		client.dbService = dbService
 	} else {
-		// Use remote configuration
-		cfg, err := config.Load()
-		if err != nil {
-			return nil, fmt.Errorf("failed to load config: %w", err)
-		}
-		client.baseURL = cfg.BaseURL
+		// Remote mode: use base URL
+		client.baseURL = baseURL
 		// Construct WebSocket URL from base URL
-		if strings.HasPrefix(cfg.BaseURL, "https://") {
-			client.socketURL = strings.Replace(cfg.BaseURL, "https://", "wss://", 1)
+		if strings.HasPrefix(baseURL, "https://") {
+			client.socketURL = strings.Replace(baseURL, "https://", "wss://", 1)
 		} else {
-			client.socketURL = strings.Replace(cfg.BaseURL, "http://", "ws://", 1)
+			client.socketURL = strings.Replace(baseURL, "http://", "ws://", 1)
+		}
+
+		// Ensure /api/v1 suffix for remote calls
+		if !strings.HasSuffix(client.baseURL, "/api/v1") {
+			client.baseURL = strings.TrimSuffix(client.baseURL, "/") + "/api/v1"
+			client.socketURL = strings.TrimSuffix(client.socketURL, "/") + "/api/v1"
 		}
 	}
 
 	return client, nil
 }
 
-// NewWithAddress creates a client with explicit address
-func NewWithAddress(agentID, entrypointTag string, local bool, host string, port int) (*Client, error) {
-	client := &Client{
-		agentID:       agentID,
-		entrypointTag: entrypointTag,
-		local:         local,
-		httpClient: &http.Client{
-			Timeout: 5 * time.Minute, // Increased for long-running agents
-		},
-		serializer: NewCoreSerializer(),
-	}
+// New creates a new RunAgent client (legacy compatibility)
+func New(agentID, entrypointTag string, local bool) (*RunAgentClient, error) {
+	return NewClient(agentID, entrypointTag, &ClientOptions{Local: local})
+}
 
-	if local {
-		client.baseURL = fmt.Sprintf("http://%s:%d", host, port)
-		client.socketURL = fmt.Sprintf("ws://%s:%d", host, port)
-	} else {
-		cfg, err := config.Load()
-		if err != nil {
-			return nil, fmt.Errorf("failed to load config: %w", err)
-		}
-		client.baseURL = cfg.BaseURL
-		// Construct WebSocket URL from base URL
-		if strings.HasPrefix(cfg.BaseURL, "https://") {
-			client.socketURL = strings.Replace(cfg.BaseURL, "https://", "wss://", 1)
-		} else {
-			client.socketURL = strings.Replace(cfg.BaseURL, "http://", "ws://", 1)
-		}
-	}
+// NewWithAddress creates a client with explicit address (legacy compatibility)
+func NewWithAddress(agentID, entrypointTag string, local bool, host string, port int) (*RunAgentClient, error) {
+	return NewClient(agentID, entrypointTag, &ClientOptions{
+		Local: local,
+		Host:  host,
+		Port:  port,
+	})
+}
 
-	return client, nil
+// FromEnv creates a client from environment variables
+func FromEnv(agentID, entrypointTag string) (*RunAgentClient, error) {
+	opts := &ClientOptions{
+		Local:   strings.ToLower(os.Getenv("RUNAGENT_LOCAL")) == "true",
+		APIKey:  os.Getenv(constants.EnvAPIKey),
+		BaseURL: os.Getenv(constants.EnvBaseURL),
+	}
+	return NewClient(agentID, entrypointTag, opts)
+}
+
+// GetExtraParams returns the extra parameters
+func (c *RunAgentClient) GetExtraParams() map[string]interface{} {
+	return c.extraParams
 }
 
 // Close closes the client and any associated resources
-func (c *Client) Close() error {
+func (c *RunAgentClient) Close() error {
 	if c.dbService != nil {
 		return c.dbService.Close()
 	}
 	return nil
 }
 
-// Run executes the agent with the given input
-func (c *Client) Run(ctx context.Context, input map[string]interface{}) (interface{}, error) {
-	if c.entrypointTag == "generic_stream" || c.entrypointTag == "stream" || strings.HasSuffix(c.entrypointTag, "_stream") {
-		return nil, types.NewValidationError("Use RunStream for streaming entrypoints")
+// Run executes the agent with the given input, returning the result
+func (c *RunAgentClient) Run(ctx context.Context, input map[string]interface{}) (interface{}, error) {
+	// Build request matching Python SDK format
+	request := map[string]interface{}{
+		"entrypoint_tag":  c.entrypointTag,
+		"input_args":      []interface{}{},
+		"input_kwargs":    input,
+		"timeout_seconds": 300,
 	}
 
-	// For LangGraph agents, the input should be passed directly as the first argument
-	// The current structure wraps it incorrectly
-	var request map[string]interface{}
+	return c.runInternal(ctx, request)
+}
 
-	// Check if this is a generic entrypoint (LangGraph)
-	if c.entrypointTag == "generic" {
-		// For LangGraph, pass the input directly as the first positional argument
-		request = map[string]interface{}{
-			"input_data": map[string]interface{}{
-				"input_args":   []interface{}{input},     // Pass input as first argument
-				"input_kwargs": map[string]interface{}{}, // Empty kwargs
-			},
-		}
-	} else {
-		// For other entrypoints, use the original structure
-		request = map[string]interface{}{
-			"input_data": map[string]interface{}{
-				"input_args":   []interface{}{},
-				"input_kwargs": input,
-			},
-		}
+// RunWithArgs executes the agent with positional and keyword arguments
+func (c *RunAgentClient) RunWithArgs(ctx context.Context, args []interface{}, kwargs map[string]interface{}) (interface{}, error) {
+	request := map[string]interface{}{
+		"entrypoint_tag":  c.entrypointTag,
+		"input_args":      args,
+		"input_kwargs":    kwargs,
+		"timeout_seconds": 300,
 	}
 
+	return c.runInternal(ctx, request)
+}
+
+// runInternal handles the common HTTP request logic for run operations
+func (c *RunAgentClient) runInternal(ctx context.Context, request map[string]interface{}) (interface{}, error) {
 	requestBody, err := json.Marshal(request)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	// Debug output
-	fmt.Printf("Request body: %s\n", string(requestBody))
-
-	url := fmt.Sprintf("%s/api/v1/agents/%s/execute/%s",
-		c.baseURL, c.agentID, c.entrypointTag)
+	url := fmt.Sprintf("%s/agents/%s/run", c.baseURL, c.agentID)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(requestBody))
 	if err != nil {
@@ -193,13 +195,9 @@ func (c *Client) Run(ctx context.Context, input map[string]interface{}) (interfa
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	c.addAuthHeader(req)
 
-	// Increase timeout for potentially long-running agents
-	client := &http.Client{
-		Timeout: 5 * time.Minute, // Increased from 30 seconds
-	}
-
-	resp, err := client.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, types.NewConnectionError(fmt.Sprintf("Failed to execute request: %v", err))
 	}
@@ -210,109 +208,140 @@ func (c *Client) Run(ctx context.Context, input map[string]interface{}) (interfa
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Debug output
-	fmt.Printf("Response status: %d\n", resp.StatusCode)
-	fmt.Printf("Response body: %s\n", string(body))
-
+	// Handle HTTP error status codes
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, types.NewAuthenticationError("Invalid or missing API key. Set RUNAGENT_API_KEY environment variable or pass api_key parameter.")
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		return nil, types.NewPermissionError("You do not have permission to access this agent")
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, types.NewServerError(fmt.Sprintf("Server returned status %d: %s", resp.StatusCode, string(body)))
 	}
 
-	// Handle empty response body
 	if len(body) == 0 {
 		return nil, types.NewServerError("Server returned empty response")
 	}
 
-	// Parse response as generic map to handle different response formats
+	return c.deserializeResponse(body)
+}
+
+// deserializeResponse handles response deserialization according to Python SDK format
+func (c *RunAgentClient) deserializeResponse(body []byte) (interface{}, error) {
 	var response map[string]interface{}
 	if err := json.Unmarshal(body, &response); err != nil {
-		// If JSON parsing fails, return the raw response
-		fmt.Printf("Failed to parse JSON response, returning raw body: %v\n", err)
 		return string(body), nil
 	}
 
 	// Check for success field
 	if success, exists := response["success"]; exists {
 		if successBool, ok := success.(bool); ok && !successBool {
-			if errorMsg, exists := response["error"]; exists {
-				return nil, types.NewServerError(fmt.Sprintf("%v", errorMsg))
+			// Extract error info
+			errorInfo := extractErrorInfo(response)
+			return nil, &types.RunAgentError{
+				Type:    "execution",
+				Message: errorInfo,
+				Code:    "SERVER_ERROR",
 			}
-			return nil, types.NewServerError("Request failed with no error message")
 		}
 	}
 
-	// Return output_data if it exists, otherwise return the whole response
+	// Try result_data.data first (legacy structured output)
+	if resultData, exists := response["result_data"]; exists {
+		if resultMap, ok := resultData.(map[string]interface{}); ok {
+			if data, exists := resultMap["data"]; exists {
+				return data, nil
+			}
+		}
+	}
+
+	// Return output_data if it exists
 	if outputData, exists := response["output_data"]; exists {
 		return outputData, nil
+	}
+
+	// Fall back to data field
+	if data, exists := response["data"]; exists {
+		return data, nil
 	}
 
 	return response, nil
 }
 
+// extractErrorInfo extracts error information from response
+func extractErrorInfo(response map[string]interface{}) string {
+	if errMsg, exists := response["error"]; exists {
+		return fmt.Sprintf("%v", errMsg)
+	}
+	if errMsg, exists := response["message"]; exists {
+		return fmt.Sprintf("%v", errMsg)
+	}
+	return "Unknown error"
+}
+
+// addAuthHeader adds authorization header to request
+func (c *RunAgentClient) addAuthHeader(req *http.Request) {
+	if c.apiKey != "" && !c.local {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
+	}
+}
+
 // RunStream executes the agent with streaming response using WebSocket
-func (c *Client) RunStream(ctx context.Context, input map[string]interface{}) (*StreamIterator, error) {
-	wsURL := fmt.Sprintf("%s/api/v1/agents/%s/execute/%s", c.socketURL, c.agentID, c.entrypointTag)
+func (c *RunAgentClient) RunStream(ctx context.Context, input map[string]interface{}) (*StreamIterator, error) {
+	// Construct WebSocket URL with query string token for authentication
+	wsURL := fmt.Sprintf("%s/agents/%s/run-stream", c.socketURL, c.agentID)
+
+	// Add API key as query parameter if available (fallback for WebSocket)
+	if c.apiKey != "" && !c.local {
+		wsURL = fmt.Sprintf("%s?token=%s", wsURL, c.apiKey)
+	}
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 30 * time.Second,
 	}
 
-	var headers http.Header
-	// Add any authentication headers if needed
-	headers = http.Header{
+	headers := http.Header{
 		"User-Agent": []string{"RunAgent-Go/1.0"},
+	}
+
+	// Add Authorization header if not local
+	if c.apiKey != "" && !c.local {
+		headers.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
 	}
 
 	conn, _, err := dialer.DialContext(ctx, wsURL, headers)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to WebSocket: %w", err)
-	}
-
-	// Send start message with correct format
-	var inputData map[string]interface{}
-	if c.entrypointTag == "generic" || strings.HasSuffix(c.entrypointTag, "_stream") {
-		// For LangGraph streaming, pass input as first argument
-		inputData = map[string]interface{}{
-			"input_args":   []interface{}{input},
-			"input_kwargs": map[string]interface{}{},
+		if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "403") {
+			return nil, types.NewAuthenticationError("Failed to authenticate WebSocket connection. Check your API key.")
 		}
-	} else {
-		// For other streaming entrypoints
-		inputData = map[string]interface{}{
-			"input_args":   []interface{}{},
-			"input_kwargs": input,
-		}
+		return nil, types.NewConnectionError(fmt.Sprintf("Failed to connect to WebSocket: %v", err))
 	}
 
-	request := ExecutionRequest{
-		Action:    "start_stream",
-		AgentID:   c.agentID,
-		InputData: inputData,
+	// Send stream request with timeout_seconds
+	request := StreamRequest{
+		EntrypointTag:  c.entrypointTag,
+		InputArgs:      []interface{}{},
+		InputKwargs:    input,
+		TimeoutSeconds: 600,
+		AsyncExecution: false,
 	}
 
-	startMsg := WebSocketMessage{
-		ID:        "stream_start",
-		Type:      "status",
-		Timestamp: time.Now().Format(time.RFC3339),
-		Data:      request,
-	}
-
-	msgData, err := c.serializer.SerializeMessage(startMsg)
+	requestData, err := json.Marshal(request)
 	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("failed to serialize start message: %w", err)
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(msgData)); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, requestData); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("failed to send start message: %w", err)
+		return nil, types.NewConnectionError(fmt.Sprintf("failed to send stream request: %v", err))
 	}
 
 	return NewStreamIterator(conn, c.serializer), nil
 }
 
 // HealthCheck checks if the agent is healthy
-func (c *Client) HealthCheck(ctx context.Context) (bool, error) {
+func (c *RunAgentClient) HealthCheck(ctx context.Context) (bool, error) {
 	url := fmt.Sprintf("%s/health", c.baseURL)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -330,13 +359,15 @@ func (c *Client) HealthCheck(ctx context.Context) (bool, error) {
 }
 
 // GetAgentArchitecture retrieves the agent's architecture information
-func (c *Client) GetAgentArchitecture(ctx context.Context) (*types.AgentArchitecture, error) {
-	url := fmt.Sprintf("%s/api/v1/agents/%s/architecture", c.baseURL, c.agentID)
+func (c *RunAgentClient) GetAgentArchitecture(ctx context.Context) (*types.AgentArchitecture, error) {
+	url := fmt.Sprintf("%s/agents/%s/architecture", c.baseURL, c.agentID)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
+
+	c.addAuthHeader(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -357,152 +388,144 @@ func (c *Client) GetAgentArchitecture(ctx context.Context) (*types.AgentArchitec
 }
 
 // AgentID returns the agent ID
-func (c *Client) AgentID() string {
+func (c *RunAgentClient) AgentID() string {
 	return c.agentID
 }
 
 // EntrypointTag returns the entrypoint tag
-func (c *Client) EntrypointTag() string {
+func (c *RunAgentClient) EntrypointTag() string {
 	return c.entrypointTag
 }
 
 // IsLocal returns whether this is a local client
-func (c *Client) IsLocal() bool {
+func (c *RunAgentClient) IsLocal() bool {
 	return c.local
 }
 
-// NewStreamIterator creates a new stream iterator
-func NewStreamIterator(conn *websocket.Conn, serializer *CoreSerializer) *StreamIterator {
-	return &StreamIterator{
-		conn:       conn,
-		serializer: serializer,
-	}
-}
+// GetAgentLimits retrieves the current agent limits from the API
+func (c *RunAgentClient) GetAgentLimits(ctx context.Context) (map[string]interface{}, error) {
+	url := fmt.Sprintf("%s/limits/agents", c.baseURL)
 
-// Next returns the next item from the stream
-func (s *StreamIterator) Next(ctx context.Context) (interface{}, bool, error) {
-	if s.finished || s.err != nil {
-		return nil, false, s.err
-	}
-
-	select {
-	case <-ctx.Done():
-		s.finished = true
-		s.conn.Close()
-		return nil, false, ctx.Err()
-	default:
-	}
-
-	_, messageData, err := s.conn.ReadMessage()
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		s.finished = true
-		s.err = fmt.Errorf("failed to read WebSocket message: %w", err)
-		return nil, false, s.err
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	fmt.Printf("received=> %s\n", string(messageData))
+	c.addAuthHeader(req)
 
-	msg, err := s.serializer.DeserializeMessage(string(messageData))
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		s.finished = true
-		s.err = fmt.Errorf("failed to deserialize message: %w", err)
-		return nil, false, s.err
+		return nil, types.NewConnectionError(fmt.Sprintf("Failed to get limits: %v", err))
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, types.NewServerError(fmt.Sprintf("Server returned status %d", resp.StatusCode))
 	}
 
-	if msg.Error != "" {
-		s.finished = true
-		s.err = fmt.Errorf("stream error: %s", msg.Error)
-		return nil, false, s.err
+	var limits map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&limits); err != nil {
+		return nil, fmt.Errorf("failed to decode limits: %w", err)
 	}
 
-	if msg.Type == "status" {
-		if data, ok := msg.Data.(map[string]interface{}); ok {
-			if status, ok := data["status"].(string); ok {
-				if status == "stream_completed" {
-					s.finished = true
-					return nil, false, nil
-				} else if status == "stream_started" {
-					return s.Next(ctx) // Skip this message and get the next one
-				}
-			}
-		}
-	} else if msg.Type == "ERROR" {
-		s.finished = true
-		s.err = fmt.Errorf("agent error: %v", msg.Data)
-		return nil, false, s.err
-	}
-
-	return msg.Data, true, nil
+	return limits, nil
 }
 
-// Close closes the stream iterator
-func (s *StreamIterator) Close() error {
-	s.finished = true
-	return s.conn.Close()
-}
+// UploadMetadata uploads sensitive metadata to the server
+func (c *RunAgentClient) UploadMetadata(ctx context.Context, metadata map[string]interface{}) (map[string]interface{}, error) {
+	url := fmt.Sprintf("%s/agents/metadata-upload", c.baseURL)
 
-// NewCoreSerializer creates a new core serializer
-func NewCoreSerializer() *CoreSerializer {
-	return &CoreSerializer{}
-}
-
-// SerializeMessage serializes a WebSocket message
-func (s *CoreSerializer) SerializeMessage(message WebSocketMessage) (string, error) {
-	messageDict := map[string]interface{}{
-		"id":        message.ID,
-		"type":      message.Type,
-		"timestamp": message.Timestamp,
-		"data":      message.Data,
-		"metadata":  message.Metadata,
-	}
-
-	data, err := json.Marshal(messageDict)
+	requestBody, err := json.Marshal(metadata)
 	if err != nil {
-		fallback := map[string]interface{}{
-			"id":        message.ID,
-			"type":      message.Type,
-			"timestamp": message.Timestamp,
-			"data":      map[string]interface{}{"error": fmt.Sprintf("Serialization failed: %s", err.Error())},
-			"error":     fmt.Sprintf("Serialization Error: %s", err.Error()),
-		}
-		data, _ = json.Marshal(fallback)
+		return nil, fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
-	return string(data), nil
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(requestBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	c.addAuthHeader(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, types.NewConnectionError(fmt.Sprintf("Failed to upload metadata: %v", err))
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, types.NewServerError(fmt.Sprintf("Server returned status %d", resp.StatusCode))
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return result, nil
 }
 
-// DeserializeMessage deserializes a WebSocket message
-func (s *CoreSerializer) DeserializeMessage(jsonStr string) (*WebSocketMessage, error) {
-	var data map[string]interface{}
-	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
-		return nil, fmt.Errorf("invalid JSON: %w", err)
+// StartAgent starts/deploys an agent on the server
+func (c *RunAgentClient) StartAgent(ctx context.Context, cfg map[string]interface{}) (map[string]interface{}, error) {
+	url := fmt.Sprintf("%s/agents/%s/start", c.baseURL, c.agentID)
+
+	requestBody, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	msg := &WebSocketMessage{}
-
-	if id, ok := data["id"].(string); ok {
-		msg.ID = id
-	}
-	if msgType, ok := data["type"].(string); ok {
-		msg.Type = msgType
-	}
-	if timestamp, ok := data["timestamp"].(string); ok {
-		msg.Timestamp = timestamp
-	}
-	if msgData, ok := data["data"]; ok {
-		msg.Data = msgData
-	}
-	if metadata, ok := data["metadata"].(map[string]interface{}); ok {
-		msg.Metadata = metadata
-	}
-	if errorMsg, ok := data["error"].(string); ok {
-		msg.Error = errorMsg
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(requestBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	return msg, nil
+	req.Header.Set("Content-Type", "application/json")
+	c.addAuthHeader(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, types.NewConnectionError(fmt.Sprintf("Failed to start agent: %v", err))
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, types.NewServerError(fmt.Sprintf("Server returned status %d", resp.StatusCode))
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return result, nil
 }
 
-// DeserializeObject deserializes a JSON object
-func (s *CoreSerializer) DeserializeObject(jsonResp interface{}, reconstruct bool) interface{} {
-	return jsonResp // Simple pass-through for now
+// GetAgentStatus retrieves the status of an agent
+func (c *RunAgentClient) GetAgentStatus(ctx context.Context) (map[string]interface{}, error) {
+	url := fmt.Sprintf("%s/agents/%s/status", c.baseURL, c.agentID)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	c.addAuthHeader(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, types.NewConnectionError(fmt.Sprintf("Failed to get status: %v", err))
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, types.NewServerError(fmt.Sprintf("Server returned status %d", resp.StatusCode))
+	}
+
+	var status map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return nil, fmt.Errorf("failed to decode status: %w", err)
+	}
+
+	return status, nil
 }
