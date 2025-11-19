@@ -18,42 +18,42 @@ func (e *RunAgentError) Error() string {
 
 // Error constructors
 func NewAuthenticationError(message string) *RunAgentError {
-	return &RunAgentError{Type: "authentication", Message: message, Code: "AUTHENTICATION_ERROR"}
-}
-
-func NewPermissionError(message string) *RunAgentError {
-	return &RunAgentError{Type: "permission", Message: message, Code: "PERMISSION_ERROR"}
+	return &RunAgentError{Type: "authentication", Message: message}
 }
 
 func NewValidationError(message string) *RunAgentError {
-	return &RunAgentError{Type: "validation", Message: message, Code: "VALIDATION_ERROR"}
+	return &RunAgentError{Type: "validation", Message: message}
 }
 
 func NewConnectionError(message string) *RunAgentError {
-	return &RunAgentError{Type: "connection", Message: message, Code: "CONNECTION_ERROR"}
+	return &RunAgentError{Type: "connection", Message: message}
 }
 
 func NewServerError(message string) *RunAgentError {
-	return &RunAgentError{Type: "server", Message: message, Code: "SERVER_ERROR"}
+	return &RunAgentError{Type: "server", Message: message}
 }
 
 func NewDatabaseError(message string) *RunAgentError {
-	return &RunAgentError{Type: "database", Message: message, Code: "DATABASE_ERROR"}
+	return &RunAgentError{Type: "database", Message: message}
 }
 
 func NewConfigError(message string) *RunAgentError {
-	return &RunAgentError{Type: "config", Message: message, Code: "CONFIG_ERROR"}
+	return &RunAgentError{Type: "config", Message: message}
 }
 
 // EntryPoint represents an agent entrypoint
 type EntryPoint struct {
-	File   string `json:"file"`
-	Module string `json:"module"`
-	Tag    string `json:"tag"`
+	File       string                 `json:"file,omitempty"`
+	Module     string                 `json:"module,omitempty"`
+	Tag        string                 `json:"tag"`
+	Name       string                 `json:"name,omitempty"`
+	Description string                `json:"description,omitempty"`
+	Extractor  map[string]interface{} `json:"extractor,omitempty"`
 }
 
 // AgentArchitecture represents agent configuration
 type AgentArchitecture struct {
+	AgentID     string       `json:"agent_id,omitempty"`
 	Entrypoints []EntryPoint `json:"entrypoints"`
 }
 
