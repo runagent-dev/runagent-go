@@ -28,7 +28,6 @@ jobs:
         run: |
           echo "Tag: ${{ github.event.client_payload.tag }}"
           echo "Version: ${{ github.event.client_payload.version }}"
-          echo "Ref: ${{ github.event.client_payload.ref }}"
 
       - name: Check if tag already exists
         id: check-tag
@@ -45,10 +44,8 @@ jobs:
       - name: Clone source repository
         if: steps.check-tag.outputs.should_sync == 'true'
         run: |
-          SOURCE_REF="${{ github.event.client_payload.ref }}"
-          git clone --depth 1 --branch "${{ github.event.client_payload.tag }}" \
-            https://github.com/runagent-dev/runagent.git /tmp/source-repo
-          echo "✅ Cloned source repo at tag ${{ github.event.client_payload.tag }}"
+          git clone --depth 1 https://github.com/runagent-dev/runagent.git /tmp/source-repo
+          echo "✅ Cloned latest from source repo (tag ${{ github.event.client_payload.tag }})"
 
       - name: Copy runagent-go folder contents
         if: steps.check-tag.outputs.should_sync == 'true'
